@@ -105,36 +105,36 @@ class PdbDoc:
         return bytes(out)
 
     def _iSilo(self):
+        """Extract text from iSilo records. SDoc = proprietary, show metadata+TOC only."""
+        
+        # SDoc format: proprietary 2-layer compression, cannot decode to text
+        # Show metadata + readable TOC index entries instead
+        if 'SDoc' in self.format:
+            toc = self._extract_toc()
+            return self._metadata_summary() + ("\n\n" + toc if toc else "")
+        
+        # iSilo SilX/3.x: try zlib decompression
         buf = []
-        # Try zlib decompression on each record
         for rec in self.records[1:]:
             if not rec: continue
+            decoded = None
             for start in range(0, min(len(rec), 12)):
                 try:
                     dec = zlib.decompress(rec[start:])
                     if len(dec) > 20:
                         t = dec.decode('utf-8', errors='replace')
                         if self._looks_text(t):
-                            buf.append(t); break
+                            decoded = t; break
                 except: pass
-            else:
-                if self._looks_text_bytes(rec):
-                    buf.append(rec.decode('utf-8', errors='replace'))
+            if decoded:
+                buf.append(decoded)
+            elif self._looks_text_bytes(rec):
+                buf.append(rec.decode('utf-8', errors='replace'))
         
         result = ''.join(buf).strip()
-        
-        # For SDoc format: also extract TOC/index (always readable)
-        toc = self._extract_toc()
-        
-        if not result and not toc:
-            return self._metadata_summary()
-        
-        if toc:
-            if result:
-                return result + "\n\n--- Document Index ---\n" + toc
-            else:
-                return self._metadata_summary() + "\n\n--- Document Index (partial text) ---\n" + toc
-        
+        if not result:
+            toc = self._extract_toc()
+            return self._metadata_summary() + ("\n\n" + toc if toc else "")
         return result
 
     def _extract_toc(self):
@@ -143,28 +143,50 @@ class PdbDoc:
         for rec in self.records[-5:]:
             entries = rec.split(b'\x00')
             for e in entries:
-                if len(e) < 4: continue
+                if len(e) < 8: continue
                 clean = e.replace(b'\xa0', b' ').decode('latin-1', errors='replace')
                 clean = re.sub(r'[^\x20-\x7e\n\t]', '', clean).strip()
-                if len(clean) > 8:
-                    buf.append(clean)
+                if len(clean) < 5: continue
+                # Filter: reject entries with "weird" chars typical of binary ASCII noise
+                weird = sum(1 for c in clean if c in '{}[]~^`|\\<>*_=+')
+                if weird > 1: continue
+                # Must have at least one real word (3+ consecutive letters)
+                if not re.search(r'[a-zA-Z]{3,}', clean): continue
+                buf.append(clean)
         return '\n'.join(buf)
 
     def _metadata_summary(self):
         sz = os.path.getsize(self.path)
+        sep = "=" * 50
         lines = [
-            f"Document: {self.name}",
-            f"Format: {self.format}",
-            f"Type/Creator: {self.db_type} / {self.creator}",
-            f"Records: {self.nrec}",
-            f"File size: {sz:,} bytes ({sz/1024:.1f} KB)",
+            sep,
+            f"  iSilo Recovery - Document Information",
+            sep,
+            f"",
+            f"  Title   : {self.name}",
+            f"  Format  : {self.format}",
+            f"  Type    : {self.db_type} / Creator: {self.creator}",
+            f"  Records : {self.nrec:,}",
+            f"  Size    : {sz:,} bytes ({sz/1024/1024:.2f} MB)",
         ]
         if self.created:
-            lines.append(f"Created: {self.created.strftime('%Y-%m-%d')}")
-        lines.append("")
-        lines.append("Note: This document uses iSilo proprietary SDoc compression.")
-        lines.append("Full text extraction requires the iSilo native decompressor.")
-        lines.append("Showing available metadata and index entries below.")
+            try:
+                lines.append(f"  Created : {self.created.strftime('%Y-%m-%d')}")
+            except: pass
+        lines.extend([
+            f"",
+            sep,
+            f"",
+            f"  FORMAT NOTE:",
+            f"  This document uses the iSilo SDoc proprietary format.",
+            f"  The text is encoded with a 2-layer compression algorithm",
+            f"  that requires the original iSilo engine to fully decode.",
+            f"",
+            f"  Readable content below is extracted from the document",
+            f"  index/table-of-contents (last record).",
+            f"",
+            sep,
+        ])
         return '\n'.join(lines)
 
     def _looks_text(self, s):
